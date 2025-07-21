@@ -2,6 +2,7 @@ from .nerf_dataset import NeRFDataset
 from .llff_dataset import LLFFDataset
 from .nsvf_dataset import NSVFDataset
 from .co3d_dataset import CO3DDataset
+from .shapenet_dataset import ShapenetDataset
 from os import path
 
 def auto_dataset(root : str, *args, **kwargs):
@@ -15,6 +16,9 @@ def auto_dataset(root : str, *args, **kwargs):
          path.isfile(path.join(root, 'transforms_train.json')):
         print("Detected NeRF (Blender) dataset")
         return NeRFDataset(root, *args, **kwargs)
+    elif path.isfile(path.join(root, 'rgb', '000000.png')):
+        print("Detected Shapenet dataset")
+        return ShapenetDataset(root, *args, **kwargs)
     else:
         print("Defaulting to extended NSVF dataset")
         return NSVFDataset(root, *args, **kwargs)
@@ -24,5 +28,6 @@ datasets = {
     'llff': LLFFDataset,
     'nsvf': NSVFDataset,
     'co3d': CO3DDataset,
+    'shapenet': ShapenetDataset,
     'auto': auto_dataset
 }

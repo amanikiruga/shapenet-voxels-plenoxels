@@ -1,0 +1,20 @@
+# run optimization 
+## within opt folder 
+python opt.py /weka/scratch/weka/tenenbaum/akiruga/svox2/data/datasets/lego_real_night_radial -t /weka/scratch/weka/tenenbaum/akiruga/svox2/data/ckpts
+### shapenet 
+python opt.py \
+/om/user/akiruga/datasets/srn_chairs_alternate_views/feab80af7f3e459120523e15ec10a342/viz -t /om/user/akiruga/svox2/data/ckpts/shapenet_chairs_1
+
+
+## render circle (in opt folder)
+python render_imgs_circle.py /om/user/akiruga/svox2/data/ckpts/ckpt.npz \
+ /om/user/akiruga/svox2/data/datasets/lego_real_night_radial
+
+python render_imgs_circle.py /om/user/akiruga/svox2/data/ckpts/shapenet_chairs_1/ckpt.npz \
+ /om/user/akiruga/datasets/srn_chairs_alternate_views/feab80af7f3e459120523e15ec10a342/viz
+
+
+python optimize_all_shapenet.py
+
+python optimize_all_shapenet.py --split 0 --total_splits 8
+nohup python optimize_all_shapenet.py --split 0 --total_splits 8 > ../nohup/optimize_all_shapenet_0.log 2>&1 &
