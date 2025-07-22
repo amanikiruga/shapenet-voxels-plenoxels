@@ -37,20 +37,18 @@ from typing import NamedTuple, Optional, Union
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
 # Create argument namespace object to mimic argparse
 class Args:
     def __init__(self):
         pass
 
 def get_default_args():
-    """Get default arguments for training"""
+    """Get default arguments for training with all the core scientific parameters preserved"""
     args = Args()
     
-    # Set all the default argument values as attributes
-    args.base_train_dir = '/om/user/akiruga/svox2/data/ckpts/shapenet_chairs_all_jupyter' # base directory for all chairs
-    # args.reso = "[[32, 32, 32]]"
-    args.reso = "[[32, 32, 32]]"  # Using 32x32x32 with grid scaling for focused resolution
+    # Set all the default argument values as attributes - preserving core scientific logic
+    args.base_train_dir = '/om/user/akiruga/svox2/data/ckpts/shapenet_chairs_jupyter' # base directory for all chairs
+    args.reso = "[[32, 32, 32]]"  # Using 32x32x32 with grid scaling for focused resolution - PRESERVE THIS
     args.upsamp_every = 3 * 12800
     args.init_iters = 0
     args.upsample_density_add = 0.0
@@ -64,10 +62,10 @@ def get_default_args():
     args.n_iters = 10 * 12800
     args.batch_size = 5000
 
-    # Grid scaling to focus 32x32x32 resolution on object region
+    # Grid scaling to focus 32x32x32 resolution on object region - PRESERVE THIS
     # Current: object ~82% of image (105/128), Target: ~60% of image
     # Scale factor: 60/82 ≈ 0.73 makes grid tighter around object
-    args.grid_scale_factor = 0.73  # Scale down scene radius to focus grid
+    args.grid_scale_factor = 0.45  # Scale down scene radius to focus grid - PRESERVE THIS
 
     args.sigma_optim = 'rmsprop'
     args.lr_sigma = 3e1
@@ -154,11 +152,11 @@ def get_default_args():
 
     args.lr_decay = True
     args.n_train = None
-    args.nosphereinit = False
+    args.nosphereinit = True  # PRESERVE THIS
 
     # Add common args from config_util
     args.config = None
-    args.dataset_type = "shapenet"
+    args.dataset_type = "shapenet" # "auto"
     args.scene_scale = None
     args.scale = None
     args.seq_id = 1000
@@ -168,9 +166,9 @@ def get_default_args():
     args.normalize_by_bbox = False
     args.data_bbox_scale = 1.2
     args.cam_scale_factor = 0.95
-    args.normalize_by_camera = True
+    args.normalize_by_camera = False
     args.perm = False
-    args.step_size = 0.5
+    args.step_size = 0.5 # 0.0125
     args.sigma_thresh = 1e-8
     args.stop_thresh = 1e-7
     args.background_brightness = 1.0
@@ -181,6 +179,11 @@ def get_default_args():
     args.use_spheric_clip = False
     args.enable_random = False
     args.last_sample_opaque = False
+
+    # data specific args - PRESERVE THESE
+    args.fov = 51.98948897809546
+    args.znear = 1.25
+    args.zfar = 2.75
     
     return args
 
@@ -217,6 +220,44 @@ def render_video(grid,
     imageio.mimwrite(str(out_path), frames, fps=fps, macro_block_size=8)
     print(f"✔️  Saved preview video → {out_path}")
     grid.train()
+    
+# Calculate grid center and size using camera-aware approach (similar to GaussianVoxelGrid) - PRESERVE THIS
+def calculate_grid_center_and_radius(cfg, camera_centers, cameras):
+    """Calculate optimal grid center and radius based on camera geometry"""
+    
+    # Extract camera data like similarity_from_cameras does
+    c2w = torch.stack([cam.c2w for cam in cameras]).cpu().numpy()  # Move to CPU first
+    t = c2w[:, :3, 3]  # Camera positions
+    R = c2w[:, :3, :3]  # Camera rotations
+    
+    # Get forward directions (where cameras are pointing) 
+    fwds = np.sum(R * np.array([0, 0.0, 1.0]), axis=-1)
+    
+    # For each camera ray, find the closest point to the mean camera position
+    # This finds where cameras are actually looking (the object center)
+    mean_cam_pos = np.mean(t, axis=0)
+    
+    closest_points = []
+    for i in range(len(t)):
+        # For ray: P(s) = t[i] + s * fwds[i]
+        # Find closest point on ray to mean_cam_pos
+        ray_param = np.dot(mean_cam_pos - t[i], fwds[i])
+        closest_point = t[i] + ray_param * fwds[i]
+        closest_points.append(closest_point)
+    
+    # The object center is the median of these closest points (same as similarity_from_cameras)
+    object_center = np.median(closest_points, axis=0)
+    
+    # Calculate grid dimensions based on FOV and z-range
+    radius = np.linalg.norm(mean_cam_pos)
+    fov_rad = np.deg2rad(cfg.fov)
+    half_xy = radius * np.tan(0.5 * fov_rad) * 0.6  # 0.6 is a safety factor
+    half_z = 0.3 * (cfg.zfar - cfg.znear)
+    
+    # Make it cubic (optional, or keep separate dimensions)
+    half_extent = max(half_xy, half_z)
+    
+    return object_center, [half_extent, half_extent, half_extent]
 
 
 def get_dense_density_sh(grid):
@@ -288,8 +329,6 @@ def train_single_object(data_dir, object_id, total_objects, args):
     np.random.seed(20200823)
 
     factor = 1
-
-    # Load dataset for this specific object
     dset = datasets[args.dataset_type](
                    args.data_dir,
                    split="train",
@@ -301,9 +340,12 @@ def train_single_object(data_dir, object_id, total_objects, args):
     if args.background_nlayers > 0 and not dset.should_use_background:
         warn('Using a background model for dataset type ' + str(type(dset)) + ' which typically does not use background')
 
+    dset_test = datasets[args.dataset_type](
+            args.data_dir, split="test", **config_util.build_data_options(args))
+
     object_start_time = datetime.now()
 
-    # Apply grid scaling to focus 32x32x32 resolution on object region
+    # Apply grid scaling to focus 32x32x32 resolution on object region - PRESERVE THIS LOGIC
     # Scale down scene radius to make grid tighter around object
     # Handle scene_radius as tensor/array for proper scaling
     if isinstance(dset.scene_radius, (list, tuple)):
@@ -311,14 +353,76 @@ def train_single_object(data_dir, object_id, total_objects, args):
     else:
         # If it's already a tensor
         scaled_scene_radius = dset.scene_radius * args.grid_scale_factor
-    
+
+    # ------------------------------------------------------------
+    # Amani code - PRESERVE THIS CUSTOM INTRINSICS CALCULATION
+
+    # Use FOV to calculate proper intrinsics for 128x128 images
+    fov_degrees = 51.98948897809546  # From your config
+    fov_radians = fov_degrees * np.pi / 180.0
+    image_size = 128  # Your actual image size
+
+    # Calculate focal length from FOV: focal = (width/2) / tan(fov/2)
+    focal_length = (image_size / 2.0) / np.tan(fov_radians / 2.0)
+    principal_point = image_size / 2.0  # Center of image
+
+    print(f"  FOV: {fov_degrees} degrees = {fov_radians} radians")
+    print(f"  Image size: {image_size}x{image_size}")
+    print(f"  Calculated focal length: {focal_length}")
+    print(f"  Principal point: ({principal_point}, {principal_point})")
+
+    # Override the intrinsics with FOV-calculated values
+    from util.util import Intrin
+    dset.intrins_full = Intrin(focal_length, focal_length, principal_point, principal_point)
+    dset.intrins = dset.intrins_full
+
+    dset_test.intrins_full = dset.intrins_full
+    dset_test.intrins = dset_test.intrins_full
+
+    # ------------------------------------------------------------
+
+    resample_cameras = [
+            svox2.Camera(c2w.to(device=device),
+                         dset.intrins.get('fx', i),
+                         dset.intrins.get('fy', i),
+                         dset.intrins.get('cx', i),
+                         dset.intrins.get('cy', i),
+                         width=dset.get_image_size(i)[1],
+                         height=dset.get_image_size(i)[0],
+                         ndc_coeffs=dset.ndc_coeffs) for i, c2w in enumerate(dset.c2w)
+        ]
+
+    # ------------------------------------------------------------
+    # Amani code - PRESERVE THIS CAMERA CENTER CALCULATION
+    # Extract camera centers from your cameras
+    camera_centers = torch.stack([cam.c2w[:3, 3] for cam in resample_cameras])
+
+    # Calculate optimal center and radius
+    optimal_center, optimal_radius = calculate_grid_center_and_radius(
+        args, camera_centers, resample_cameras)
+
+    # custom_center = [0.0,0.0, (args.zfar + args.znear)/2]
+    custom_center = [0.0,0.0,0.0]  # PRESERVE THIS CUSTOM CENTER
+
+    print(f"Calculated optimal center: {optimal_center}")
+    print(f"Calculated optimal radius: {optimal_radius}")
+    print(f"Custom center: {custom_center}")
+    print(f"Original dataset center: {dset.scene_center}")
+
     print(f"Original scene radius: {dset.scene_radius}")
     print(f"Scaled scene radius: {scaled_scene_radius} (scale factor: {args.grid_scale_factor})")
 
+    # Apply your scale factor to the calculated radius
+    scaled_optimal_radius = [r * args.grid_scale_factor for r in optimal_radius]
+
+    # ------------------------------------------------------------
+
     grid = svox2.SparseGrid(reso=reso_list[reso_id],
-                            center=dset.scene_center,
-                            radius=scaled_scene_radius,  # Use scaled radius for focused grid
+                            # center=dset.scene_center,
+                            center=custom_center, # Amani code: use custom center - PRESERVE THIS
+                            radius=scaled_scene_radius,
                             use_sphere_bound=dset.use_sphere_bound and not args.nosphereinit,
+                            # use_sphere_bound=False, # Amani code: use sphere bound
                             basis_dim=args.sh_dim,
                             use_z_order=True,
                             device=device,
@@ -335,11 +439,23 @@ def train_single_object(data_dir, object_id, total_objects, args):
 
     if grid.use_background:
         grid.background_data.data[..., -1] = args.init_sigma_bg
+        #  grid.background_data.data[..., :-1] = 0.5 / svox2.utils.SH_C0
+
+    #  grid.sh_data.data[:, 0] = 4.0
+    #  osh = grid.density_data.data.shape
+    #  den = grid.density_data.data.view(grid.links.shape)
+    #  #  den[:] = 0.00
+    #  #  den[:, :256, :] = 1e9
+    #  #  den[:, :, 0] = 1e9
+    #  grid.density_data.data = den.view(osh)
 
     optim_basis_mlp = None
 
     if grid.basis_type == svox2.BASIS_TYPE_3D_TEXTURE:
         grid.reinit_learned_bases(init_type='sh')
+        #  grid.reinit_learned_bases(init_type='fourier')
+        #  grid.reinit_learned_bases(init_type='sg', upper_hemi=True)
+        #  grid.basis_data.data.normal_(mean=0.28209479177387814, std=0.001)
 
     elif grid.basis_type == svox2.BASIS_TYPE_MLP:
         # MLP!
@@ -354,16 +470,6 @@ def train_single_object(data_dir, object_id, total_objects, args):
 
     gstep_id_base = 0
 
-    resample_cameras = [
-            svox2.Camera(c2w.to(device=device),
-                         dset.intrins.get('fx', i),
-                         dset.intrins.get('fy', i),
-                         dset.intrins.get('cx', i),
-                         dset.intrins.get('cy', i),
-                         width=dset.get_image_size(i)[1],
-                         height=dset.get_image_size(i)[0],
-                         ndc_coeffs=dset.ndc_coeffs) for i, c2w in enumerate(dset.c2w)
-        ]
     ckpt_path = path.join(args.train_dir, 'ckpt.npz')
 
     lr_sigma_func = get_expon_lr_func(args.lr_sigma, args.lr_sigma_final, args.lr_sigma_delay_steps,
@@ -387,21 +493,23 @@ def train_single_object(data_dir, object_id, total_objects, args):
 
     epoch_id = -1
 
-    # Temporarily add gray density to visualize grid bounds in first video
-    print("Setting temporary gray density to visualize focused grid bounds...")
-    original_density = grid.density_data.data.clone()
-    grid.density_data.data[:] = 0.05  # Small gray density to show where our focused grid is
+    # Add gray density to visualize focused grid bounds in the first video
+    print("Setting temporary gray density to visualize grid bounds...")
+    grid.density_data.data[:] = 100.0  # High density for complete opacity
+    grid.sh_data.data[:] = -0.5        # Negative to counteract +0.5 offset in rendering for black color
 
-    first_vid_path = Path(args.train_dir) / "video_00000.mp4"
-    render_video(grid,
-                 resample_cameras[:60],   # 60 poses ≈ 5 s @ 12 fps
-                 first_vid_path,
-                 fps=12, crop=1) 
+    # Re-render first video with visible grid bounds
+    first_vid_path_bounds = Path(args.train_dir) / "video_00000_bounds.mp4" 
+    render_video(grid, resample_cameras, first_vid_path_bounds, fps=12, crop=1)
 
     # Reset density to proper initial values for training
     grid.density_data.data[:] = 0.0 if args.lr_fg_begin_step > 0 else args.init_sigma
-    print(f"✅ First video shows focused grid bounds, density reset to {args.init_sigma if args.lr_fg_begin_step == 0 else 0.0} for training")
+    grid.sh_data.data[:] = 0.0  # Reset SH coefficients
 
+    print(f"✅ Grid bounds video saved! Density reset to {args.init_sigma if args.lr_fg_begin_step == 0 else 0.0} for training")
+
+    dset_test = dset
+    
     # Training loop
     while True:
         dset.shuffle_rays()
@@ -433,11 +541,13 @@ def train_single_object(data_dir, object_id, total_objects, args):
                 rgb_gt = dset.rays.gt[batch_begin: batch_end]
                 rays = svox2.Rays(batch_origins, batch_dirs)
 
+                #  with Timing("volrend_fused"):
                 rgb_pred = grid.volume_render_fused(rays, rgb_gt,
                         beta_loss=args.lambda_beta,
                         sparsity_loss=args.lambda_sparsity,
                         randomize=args.enable_random)
 
+                #  with Timing("loss_comp"):
                 mse = F.mse_loss(rgb_gt, rgb_pred)
 
                 # Stats
@@ -454,7 +564,16 @@ def train_single_object(data_dir, object_id, total_objects, args):
                         stat_val = stats[stat_name] / args.print_every
                         summary_writer.add_scalar(stat_name, stat_val, global_step=gstep_id)
                         stats[stat_name] = 0.0
-
+                    #  if args.lambda_tv > 0.0:
+                    #      with torch.no_grad():
+                    #          tv = grid.tv(logalpha=args.tv_logalpha, ndc_coeffs=dset.ndc_coeffs)
+                    #      summary_writer.add_scalar("loss_tv", tv, global_step=gstep_id)
+                    #  if args.lambda_tv_sh > 0.0:
+                    #      with torch.no_grad():
+                    #          tv_sh = grid.tv_color()
+                    #      summary_writer.add_scalar("loss_tv_sh", tv_sh, global_step=gstep_id)
+                    #  with torch.no_grad():
+                    #      tv_basis = grid.tv_basis() #  summary_writer.add_scalar("loss_tv_basis", tv_basis, global_step=gstep_id)
                     summary_writer.add_scalar("lr_sh", lr_sh, global_step=gstep_id)
                     summary_writer.add_scalar("lr_sigma", lr_sigma, global_step=gstep_id)
                     if grid.basis_type == svox2.BASIS_TYPE_3D_TEXTURE:
@@ -468,8 +587,19 @@ def train_single_object(data_dir, object_id, total_objects, args):
                     if args.weight_decay_sigma < 1.0:
                         grid.density_data.data *= args.weight_decay_sh
 
+                #  # For outputting the % sparsity of the gradient
+                #  indexer = grid.sparse_sh_grad_indexer
+                #  if indexer is not None:
+                #      if indexer.dtype == torch.bool:
+                #          nz = torch.count_nonzero(indexer)
+                #      else:
+                #          nz = indexer.size()
+                #      with open(os.path.join(args.train_dir, 'grad_sparsity.txt'), 'a') as sparsity_file:
+                #          sparsity_file.write(f"{gstep_id} {nz}\n")
+
                 # Apply TV/Sparsity regularizers
                 if args.lambda_tv > 0.0:
+                    #  with Timing("tv_inpl"):
                     grid.inplace_tv_grad(grid.density_data.grad,
                             scaling=args.lambda_tv,
                             sparse_frac=args.tv_sparsity,
@@ -477,6 +607,7 @@ def train_single_object(data_dir, object_id, total_objects, args):
                             ndc_coeffs=dset.ndc_coeffs,
                             contiguous=args.tv_contiguous)
                 if args.lambda_tv_sh > 0.0:
+                    #  with Timing("tv_color_inpl"):
                     grid.inplace_tv_color_grad(grid.sh_data.grad,
                             scaling=args.lambda_tv_sh,
                             sparse_frac=args.tv_sh_sparsity,
@@ -501,6 +632,8 @@ def train_single_object(data_dir, object_id, total_objects, args):
                     tv_basis = grid.tv_basis()
                     loss_tv_basis = tv_basis * args.lambda_tv_basis
                     loss_tv_basis.backward()
+                #  print('nz density', torch.count_nonzero(grid.sparse_grad_indexer).item(),
+                #        ' sh', torch.count_nonzero(grid.sparse_sh_grad_indexer).item())
 
                 # Manual SGD/rmsprop step
                 if gstep_id >= args.lr_fg_begin_step:
@@ -519,17 +652,18 @@ def train_single_object(data_dir, object_id, total_objects, args):
         gc.collect()
         
         # Render video after each epoch
-        step_vid_path = Path(args.train_dir) / f"video_{epoch_id:06d}.mp4"
-        render_video(grid, resample_cameras[:60], step_vid_path, fps=12, crop=1.0)
+        # step_vid_path = Path(args.train_dir) / f"video_{epoch_id:06d}.mp4"
+        # render_video(grid, resample_cameras[:60], step_vid_path, fps=12, crop=1.0)
         
         gstep_id_base += batches_per_epoch
 
-        # Save periodic checkpoints
-        if args.save_every > 0 and (epoch_id) % max(factor, args.save_every) == 0 and not args.tune_mode:
+        #  ckpt_path = path.join(args.train_dir, f'ckpt_{epoch_id:05d}.npz')
+        # Overwrite prev checkpoints since they are very huge
+        if args.save_every > 0 and (epoch_id) % max(
+                factor, args.save_every) == 0 and not args.tune_mode:
             print('Saving', ckpt_path)
             grid.save(ckpt_path)
 
-        # Upsampling
         if (gstep_id_base - last_upsamp_step) >= args.upsamp_every:
             last_upsamp_step = gstep_id_base
             if reso_id < len(reso_list) - 1:
@@ -548,7 +682,7 @@ def train_single_object(data_dir, object_id, total_objects, args):
                 grid.resample(reso=reso_list[reso_id],
                         sigma_thresh=args.density_thresh,
                         weight_thresh=args.weight_thresh / z_reso if use_sparsify else 0.0,
-                        dilate=2,
+                        dilate=2, #use_sparsify,
                         cameras=resample_cameras if args.thresh_type == 'weight' else None,
                         max_elements=args.max_grid_elements)
 
@@ -564,7 +698,6 @@ def train_single_object(data_dir, object_id, total_objects, args):
                 dset.gen_rays(factor=factor)
                 dset.shuffle_rays()
 
-        # Check if training is complete
         if gstep_id_base >= args.n_iters:
             print(f'* Final save for object {object_id}/{total_objects}')
             object_stop_time = datetime.now()
@@ -637,8 +770,9 @@ def parse_args():
     parser.add_argument('--base_output_dir', type=str,
                         default='/om/user/akiruga/svox2/data/ckpts/shapenet_chairs_all_jupyter',
                         help='Base output directory for all trained models')
-    parser.add_argument('--grid_scale_factor', type=float, default=None,
-                        help='Scale factor for scene radius to focus grid (e.g., 0.73 to make object occupy ~60%% vs ~82%% of image). If not provided, uses default from get_default_args()')
+    parser.add_argument('--objects_json', type=str,
+                        default='/om/user/akiruga/splatter-image/shapenet_chairs_train_objects_with_views_updated.json',
+                        help='JSON file containing training object IDs and metadata')
     
     return parser.parse_args()
 
@@ -648,11 +782,50 @@ if __name__ == "__main__":
     # Parse command line arguments
     cli_args = parse_args()
     
-    # Find all ShapeNet chair object directories
-    all_object_dirs = glob.glob(os.path.join(cli_args.base_data_dir, "*/viz"))
-    all_object_dirs.sort()  # Ensure consistent ordering across runs
-    
-    print(f"Found {len(all_object_dirs)} total ShapeNet chair objects")
+    # Load training objects from JSON file
+    print(f"Loading training objects from: {cli_args.objects_json}")
+    try:
+        with open(cli_args.objects_json, 'r') as f:
+            objects_data = json.load(f)
+        
+        # Extract unique object IDs from the JSON file
+        # Each entry is [object_id, category, view_count]
+        object_ids = list(set([entry[0] for entry in objects_data]))
+        object_ids.sort()  # Ensure consistent ordering across runs
+        
+        print(f"Found {len(object_ids)} unique object IDs in JSON file")
+        
+        # Construct full paths and verify they exist
+        all_object_dirs = []
+        missing_objects = []
+        
+        for object_id in object_ids:
+            object_path = os.path.join(cli_args.base_data_dir, object_id, "viz")
+            if os.path.exists(object_path):
+                all_object_dirs.append(object_path)
+            else:
+                missing_objects.append(object_id)
+        
+        print(f"Found {len(all_object_dirs)} existing ShapeNet chair objects")
+        if missing_objects:
+            print(f"Warning: {len(missing_objects)} objects from JSON not found on disk")
+            if len(missing_objects) <= 10:
+                print(f"Missing objects: {missing_objects}")
+            else:
+                print(f"First 10 missing objects: {missing_objects[:10]}")
+                
+    except FileNotFoundError:
+        print(f"Error: JSON file not found at {cli_args.objects_json}")
+        print("Falling back to finding all objects in directory...")
+        all_object_dirs = glob.glob(os.path.join(cli_args.base_data_dir, "*/viz"))
+        all_object_dirs.sort()
+        print(f"Found {len(all_object_dirs)} total ShapeNet chair objects")
+    except Exception as e:
+        print(f"Error loading JSON file: {e}")
+        print("Falling back to finding all objects in directory...")
+        all_object_dirs = glob.glob(os.path.join(cli_args.base_data_dir, "*/viz"))
+        all_object_dirs.sort()
+        print(f"Found {len(all_object_dirs)} total ShapeNet chair objects")
     
     # Apply max_objects limit if specified (for testing)
     if cli_args.max_objects is not None and isinstance(cli_args.max_objects, int):
@@ -698,11 +871,6 @@ if __name__ == "__main__":
     args = get_default_args()
     args.base_train_dir = cli_args.base_output_dir
     
-    # Update grid_scale_factor if provided via command line
-    if cli_args.grid_scale_factor is not None:
-        args.grid_scale_factor = cli_args.grid_scale_factor
-        print(f"Using grid_scale_factor: {args.grid_scale_factor}")
-
     # Train remaining objects
     completed_objects = []
     failed_objects = []
