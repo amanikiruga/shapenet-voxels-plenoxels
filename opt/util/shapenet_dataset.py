@@ -191,30 +191,41 @@ class ShapenetDataset(DatasetBase):
         assert full_size[0] > 0 and full_size[1] > 0, "Empty images"
         self.n_images, self.h_full, self.w_full, _ = self.gt.shape
 
-        intrin_path = path.join(root, "intrinsics.txt")
-        assert path.exists(intrin_path), "intrinsics unavailable"
-        try:
-            K: np.ndarray = np.loadtxt(intrin_path)
-            fx = K[0, 0]
-            fy = K[1, 1]
-            cx = K[0, 2]
-            cy = K[1, 2]
-        except:
-            # Weird format sometimes in NSVF data
-            with open(intrin_path, "r") as f:
-                spl = f.readline().split()
-                fx = fy = float(spl[0])
-                cx = float(spl[1])
-                cy = float(spl[2])
-        if scale < 1.0:
-            scale_w = rsz_w / full_size[1]
-            scale_h = rsz_h / full_size[0]
-            fx *= scale_w
-            cx *= scale_w
-            fy *= scale_h
-            cy *= scale_h
+        # intrin_path = path.join(root, "intrinsics.txt")
+        # assert path.exists(intrin_path), "intrinsics unavailable"
+        # try:
+        #     K: np.ndarray = np.loadtxt(intrin_path)
+        #     fx = K[0, 0]
+        #     fy = K[1, 1]
+        #     cx = K[0, 2]
+        #     cy = K[1, 2]
+        # except:
+        #     # Weird format sometimes in NSVF data
+        #     with open(intrin_path, "r") as f:
+        #         spl = f.readline().split()
+        #         fx = fy = float(spl[0])
+        #         cx = float(spl[1])
+        #         cy = float(spl[2])
+        # if scale < 1.0:
+        #     scale_w = rsz_w / full_size[1]
+        #     scale_h = rsz_h / full_size[0]
+        #     fx *= scale_w
+        #     cx *= scale_w
+        #     fy *= scale_h
+        #     cy *= scale_h
 
-        self.intrins_full : Intrin = Intrin(fx, fy, cx, cy)
+        # self.intrins_full : Intrin = Intrin(fx, fy, cx, cy)
+        
+        # Use FOV to calculate proper intrinsics for 128x128 images
+        fov_degrees = 51.98948897809546  # From your config
+        fov_radians = fov_degrees * np.pi / 180.0
+        image_size = 128  # Your actual image size
+
+        # Calculate focal length from FOV: focal = (width/2) / tan(fov/2)
+        focal_length = (image_size / 2.0) / np.tan(fov_radians / 2.0)
+        principal_point = image_size / 2.0  # Center of image
+        
+        self.intrins_full = Intrin(focal_length, focal_length, principal_point, principal_point)
         print(' intrinsics (loaded reso)', self.intrins_full)
 
         self.scene_scale = scene_scale
